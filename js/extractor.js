@@ -307,9 +307,10 @@ function modelPage(pg, pageNo, checks) {
         const R = Math.min(...vs.filter(v => v.x >= c.R - SNAP).map(v => v.x), tR);
         const its = pg.items.filter(it => it.cx > L && it.cx < R && it.cy > y0 && it.cy < y1);
         its.forEach(take);
-        const label = linesOf(its).reduce((a, l) => !a ? l : (/[A-Za-z0-9]-$/.test(a) && /^[A-Za-z0-9]/.test(l) ? a + l : a + ' ' + l), '');
+        const hLines = linesOf(its);
+        const label = hLines.reduce((a, l) => !a ? l : (/[A-Za-z0-9]-$/.test(a) && /^[A-Za-z0-9]/.test(l) ? a + l : a + ' ' + l), '');
         const rotated = its.length > 0 && its.every(it => !it.upright);
-        levels.push({ id: `${L.toFixed(1)}|${R.toFixed(1)}|${y0.toFixed(1)}|${y1.toFixed(1)}`, label, rotated, nChars: its.reduce((s, it) => s + nonWs(it.str), 0) });
+        levels.push({ id: `${L.toFixed(1)}|${R.toFixed(1)}|${y0.toFixed(1)}|${y1.toFixed(1)}`, label, lines: hLines, rotated, nChars: its.reduce((s, it) => s + nonWs(it.str), 0) });
       }
       return levels;
     });
@@ -414,11 +415,12 @@ export async function extractTable(pdf, OPS) {
 
   const rows = pages.flatMap(p => p.rows);
 
-  // Multi-line cells. The ERP prints some values on a second line in brackets,
-  // e.g. "44.1" + "(A2)" or "235.3 / 300" + "(78.45%)"; those become their own column.
-  // Any other line break is the browser wrapping a long value, so the lines are
-  // joined back together. A break right after a hyphen is joined without a space
-  // (that is how browsers wrap "SURI-MEHTA") and reported for a manual look.
+  // Multi-line cells. Some cells stack several values, e.g. "44.1" over "(A2)",
+  // "87.3" over "A2", or a name over "(4891)" over "160/200". When a column
+  // regularly has k lines, each line becomes its own Excel column. A cell with a
+  // different number of lines (a long name that wrapped, a missing attendance
+  // line) is placed by the type of each value; if that placement is not certain,
+  // conversion stops instead of guessing.
   const hyphenJoins = [];
   const joinWrapped = (lines, where) => {
     let out = '';
@@ -429,62 +431,154 @@ export async function extractTable(pdf, OPS) {
     });
     return out;
   };
-  const isBracket = v => /^\([^()]*\)$/.test(v);
+  const kind = v => {
+    if (/^\(.*\)$/.test(v)) return 'bracket';
+    if (/%$/.test(v)) return 'percent';
+    if (/\//.test(v)) return 'fraction';
+    if (/^-?\d+(\.\d+)?$/.test(v)) return 'number';
+    if (/^([A-Z][0-9]?[+\-]?|[A-Z]{2}|-)$/.test(v)) return 'code';
+    return 'text';
+  };
+  const where = (r, c) => `S.No ${r.cells[0].join(' ')}, ${c.group ? c.group.label + ' › ' : ''}${c.leaf}`;
+  // a line ending in "/" (e.g. "173.6 /" then "200") is one value wrapped by the browser
+  const slashJoins = [];
+  for (const r of rows) r.cells = r.cells.map((lines, ci) => {
+    const out = [];
+    for (const ln of lines) {
+      const prev = out[out.length - 1];
+      if (prev !== undefined && prev.length > 1 && /\/$/.test(prev) && /^[A-Za-z0-9(]/.test(ln)) {
+        if (/ \/$/.test(prev)) out[out.length - 1] = prev + ' ' + ln;
+        else { out[out.length - 1] = prev + ln; slashJoins.push(where(r, columns[ci])); }
+      } else out.push(ln);
+    }
+    return out;
+  });
+  if (slashJoins.length) checks.push({ level: 'warn', msg: `${slashJoins.length} value(s) wrapped right after "/" and were joined without a space. Please glance at: ${slashJoins.slice(0, 5).join('; ')}${slashJoins.length > 5 ? '…' : ''}` });
+  const irregular = [];   // rows placed by value type (reported)
+  const textJoins = [];
   columns.forEach((c, i) => {
-    const filled = rows.filter(r => r.cells[i].length);
-    const multi = filled.filter(r => r.cells[i].length > 1);
-    c.parts = 1;
-    if (!multi.length) return;
-    const bracketed = filled.filter(r => r.cells[i].length > 1 && isBracket(r.cells[i][r.cells[i].length - 1]));
-    if (bracketed.length >= filled.length * 0.8) {
-      c.parts = 2; c.mode = 'bracket';
-      const odd = filled.length - bracketed.length;
-      if (odd) checks.push({ level: 'warn', msg: `"${c.leaf}"${c.group ? ' (' + c.group.label + ')' : ''}: ${odd} cell(s) have no bracketed second line; the whole cell was kept in the first column.` });
-    } else {
+    c.parts = 1; c.split = null;
+    if (!rows.some(r => r.cells[i].length > 1)) return;
+    // consecutive lines of words are one wrapped value (e.g. a long name), unless the
+    // heading shows the same number of lines and nearly every cell has exactly that many
+    const hlc0 = (c.levels[c.levels.length - 1].lines || []).length;
+    const f0 = {}; let nf0 = 0;
+    rows.forEach(r => { const n = r.cells[i].length; if (n) { f0[n] = (f0[n] || 0) + 1; nf0++; } });
+    const k0 = +Object.entries(f0).sort((a, b) => b[1] - a[1] || b[0] - a[0])[0][0];
+    const keepText = hlc0 === k0 && f0[k0] >= nf0 * 0.8;
+    const L = rows.map(r => {
+      if (keepText) return r.cells[i];
+      const out = [];
+      r.cells[i].forEach(ln => {
+        const prev = out[out.length - 1];
+        if (prev && kind(prev.join(' ')) === 'text' && kind(ln) === 'text') prev.push(ln); else out.push([ln]);
+      });
+      return out.map(g => { if (g.length > 1) textJoins.push(where(r, c)); return g.length > 1 ? joinWrapped(g, where(r, c)) : g[0]; });
+    });
+    const cellsOf = r => L[rows.indexOf(r)];
+    const filled = rows.filter(r => cellsOf(r).length);
+    const multi = filled.filter(r => cellsOf(r).length > 1);
+    if (!multi.length) { c.mode = 'joined'; checks.push({ level: 'info', msg: `"${c.leaf}": ${rows.filter(r => r.cells[i].length > 1).length} cell(s) wrap onto more than one line; the lines were joined back into one value.` }); return; }
+    const freq = {};
+    filled.forEach(r => { const n = cellsOf(r).length; freq[n] = (freq[n] || 0) + 1; });
+    const k = +Object.entries(freq).sort((a, b) => b[1] - a[1] || b[0] - a[0])[0][0];
+    if (k < 2 || freq[k] < filled.length * 0.6) {
       c.mode = 'joined';
       checks.push({ level: 'info', msg: `"${c.leaf}": ${multi.length} cell(s) wrap onto more than one line; the lines were joined back into one value.` });
+      return;
     }
+    // what kind of value each line usually holds
+    const allowed = Array.from({ length: k }, (_, j) => {
+      const cnt = {}; let tot = 0;
+      filled.filter(r => cellsOf(r).length === k).forEach(r => { const t = kind(cellsOf(r)[j]); cnt[t] = (cnt[t] || 0) + 1; tot++; });
+      return new Set(Object.keys(cnt).filter(t => cnt[t] >= tot * 0.1));
+    });
+    // stacked fields differ in kind (name vs "(4891)", "87.3" vs "A2"); lines that
+    // are all words are one wrapped value unless the heading has the same lines
+    const hlc = (c.levels[c.levels.length - 1].lines || []).length;
+    const dominant = allowed.map((_, j) => {
+      const cnt = {}; filled.filter(r => cellsOf(r).length === k).forEach(r => { const t = kind(cellsOf(r)[j]); cnt[t] = (cnt[t] || 0) + 1; });
+      return Object.entries(cnt).sort((a, b) => b[1] - a[1])[0][0];
+    });
+    const stacked = hlc === k || new Set(dominant).size > 1;
+    if (!stacked) {
+      c.mode = 'joined';
+      checks.push({ level: 'info', msg: `"${c.leaf}": ${multi.length} cell(s) wrap onto more than one line; the lines were joined back into one value.` });
+      return;
+    }
+    const wrapPart = allowed.map((a, j) => a.has('text') ? j : -1).filter(j => j >= 0);
+    const cost = (lines, asg) => {
+      let v = 0, cst = 0;
+      const per = Array.from({ length: k }, () => []);
+      lines.forEach((ln, li) => { per[asg[li]].push(ln); if (!allowed[asg[li]].has(kind(ln))) { v++; cst += 100; } });
+      per.forEach((p, j) => { if (!p.length) cst += 5; if (p.length > 1) cst += wrapPart.includes(j) ? 3 * (p.length - 1) : 100 * (p.length - 1); });
+      return { cst, per, v };
+    };
+    const assignments = n => {
+      const out = [];
+      const rec = (li, from, acc) => { if (li === n) { out.push(acc.slice()); return; } for (let j = from; j < k; j++) { acc.push(j); rec(li + 1, j, acc); acc.pop(); } };
+      rec(0, 0, []);
+      return out;
+    };
+    c.parts = k; c.mode = 'split';
+    c.placed = rows.map(r => {
+      const lines = cellsOf(r);
+      if (!lines.length) return Array(k).fill(null).map(() => []);
+      const n = lines.length;
+      const ident = n === k ? cost(lines, lines.map((_, j) => j)) : null;
+      if (ident && ident.cst < 100) return ident.per;
+      const all = assignments(n).map(a => cost(lines, a)).sort((p, q) => p.cst - q.cst);
+      const best = all[0];
+      const tie = all.length > 1 && all[1].cst === best.cst && JSON.stringify(all[1].per) !== JSON.stringify(best.per);
+      if (ident) {
+        if (best.cst < 100) { checks.push({ level: 'error', msg: `${where(r, c)}: the ${n} lines "${lines.join(' / ')}" could belong to different fields; please check this cell in the PDF.` }); return ident.per; }
+        checks.push({ level: 'warn', msg: `${where(r, c)}: unusual value "${lines.join(' / ')}"; kept line by line.` });
+        return ident.per;
+      }
+      if (best.cst >= 100 || tie) { checks.push({ level: 'error', msg: `${where(r, c)}: cannot tell which field each line belongs to ("${lines.join(' / ')}"); please check this cell in the PDF.` }); return best.per; }
+      irregular.push(`${where(r, c)}: "${lines.join(' / ')}"`);
+      return best.per;
+    });
+    // part names: header lines, or a "Total/Grade" style heading, or value type
+    const hl = (c.levels[c.levels.length - 1].lines || []).map(t => t.replace(/^\((.*)\)$/, '$1').trim()).filter(Boolean);
+    const slash = c.leaf.split('/').map(t => t.trim()).filter(Boolean);
+    let names = null;
+    if (hl.length === k) names = hl;
+    else if (slash.length === k) names = slash;
+    else {
+      names = [c.leaf];
+      for (let j = 1; j < k; j++) {
+        const vals = c.placed.map(p => p[j].join(' ')).filter(Boolean);
+        let nm = `${c.leaf} (line ${j + 1})`;
+        if (vals.length && vals.every(v => /%\)?$/.test(v))) nm = 'Percentage';
+        else if (vals.length && vals.every(v => /^\(?[A-Z][A-Z0-9+\-]{0,2}\)?$/.test(v))) nm = 'Grade';
+        names.push(nm);
+      }
+    }
+    c.split = names;
   });
 
-  // sub-column names for bracketed second lines
-  for (const c of columns) {
-    c.partNames = [c.leaf];
-    if (c.parts === 2) {
-      const vals = rows.map(r => r.cells[c.index]).filter(l => l.length > 1 && isBracket(l[l.length - 1])).map(l => l[l.length - 1]);
-      let name = `${c.leaf} (2nd line)`;
-      if (vals.every(v => /%\)$/.test(v))) name = 'Percentage';
-      else if (vals.every(v => /^\([A-Z][A-Z0-9+\-]{0,3}\)$/.test(v))) name = 'Grade';
-      c.partNames.push(name);
-    }
-  }
+  for (const c of columns) c.partNames = c.split || [c.leaf];
 
   // flat output grid
   const flatCols = columns.flatMap(c => c.partNames.map((n, k) => ({ col: c, part: k, name: n })));
-  const grid = rows.map(r => {
-    const sn = r.cells[0].join(' ');
-    return flatCols.map(fc => {
-      const lines = r.cells[fc.col.index];
-      const where = `S.No ${sn}, ${fc.col.group ? fc.col.group.label + ' › ' : ''}${fc.col.leaf}`;
-      if (fc.col.parts === 2) {
-        const hasB = lines.length > 1 && isBracket(lines[lines.length - 1]);
-        if (fc.part === 1) return hasB ? lines[lines.length - 1] : '';
-        return joinWrapped(hasB ? lines.slice(0, -1) : lines, where);
-      }
-      return joinWrapped(lines, where);
-    });
-  });
-  // printable layout uses the same logical parts (wraps re-joined)
+  const grid = rows.map((r, ri) => flatCols.map(fc => {
+    const c = fc.col;
+    if (c.mode === 'split') return joinWrapped(c.placed[ri][fc.part], where(r, c));
+    return joinWrapped(r.cells[c.index], where(r, c));
+  }));
+  // printable layout: one line per part (wraps re-joined)
   const printRows = rows.map((r, ri) => ({
     page: r.page,
     cells: columns.map(c => {
-      if (c.parts === 2) {
-        const i0 = flatCols.findIndex(fc => fc.col === c);
-        return [grid[ri][i0], grid[ri][i0 + 1]].filter(v => v !== '');
-      }
       const i0 = flatCols.findIndex(fc => fc.col === c);
-      return grid[ri][i0] === '' ? [] : [grid[ri][i0]];
+      return c.partNames.map((_, k) => grid[ri][i0 + k]).filter(v => v !== '');
     }),
   }));
+  if (irregular.length) checks.push({ level: 'warn', msg: `${irregular.length} cell(s) had a different number of lines than usual and were placed by value type. Please glance at: ${irregular.slice(0, 5).join('; ')}${irregular.length > 5 ? '…' : ''}` });
+  const tj = [...new Set(textJoins)].filter(w => columns.some(c => c.mode === 'split' && w.endsWith(c.leaf)));
+  if (tj.length) checks.push({ level: 'info', msg: `${tj.length} long value(s) (e.g. names) wrapped onto two lines in the PDF and were joined back into one value.` });
+  { const u = [...new Set(hyphenJoins)]; hyphenJoins.length = 0; hyphenJoins.push(...u); }
   if (hyphenJoins.length) checks.push({ level: 'warn', msg: `${hyphenJoins.length} value(s) wrapped after a hyphen and were joined without a space (e.g. "SURI-" + "MEHTA" → "SURI-MEHTA"). Please glance at: ${hyphenJoins.slice(0, 5).join('; ')}${hyphenJoins.length > 5 ? '…' : ''}` });
 
   // ---- checks

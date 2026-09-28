@@ -54,14 +54,32 @@ async function addFile(file) {
     render(entry, card);
   } catch (err) {
     console.error(err);
-    card.innerHTML = `<div class="file-head"><div><h2>${esc(file.name)}</h2><div class="src">This file could not be read as a PDF: ${esc(err.message || err)}</div></div><span class="status err">Not converted</span></div>`;
+    card.innerHTML = `<div class="file-head"><div><h2>${esc(file.name)}</h2><div class="src">This file could not be read as a PDF: ${esc(err.message || err)}</div></div><div class="head-right"><span class="status err">Not converted</span><button class="remove" data-role="remove">Remove</button></div></div>`;
+    $('[data-role=remove]', card).addEventListener('click', () => removeEntry(id));
   }
   refreshBulk();
 }
 
+function removeEntry(id) {
+  const i = entries.findIndex(e => e.id === id);
+  if (i >= 0) entries.splice(i, 1);
+  document.getElementById(id)?.remove();
+  if (!$('#files').children.length) $('#empty').hidden = false;
+  refreshBulk();
+}
+$('#clearAll').addEventListener('click', () => {
+  entries.length = 0;
+  $('#files').innerHTML = '';
+  $('#empty').hidden = false;
+  $('#pick').value = '';
+  refreshBulk();
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+  toast('Cleared. Add the next PDF.');
+});
+
 function refreshBulk() {
   const usable = entries.filter(e => e.result.columns && (e.result.ok || e.override));
-  $('#bulk').hidden = entries.length === 0;
+  $('#bulk').hidden = entries.length === 0 && !$('#files').children.length;
   $('#allXlsx').disabled = usable.length === 0;
   $('#allXlsx').textContent = usable.length > 1 ? `Download ${usable.length} classes in one workbook` : 'Download Excel';
 }
@@ -72,8 +90,9 @@ const ICON = { ok: '✓', error: '✕', warn: '!', info: 'i' };
 function render(entry, card) {
   const r = entry.result;
   if (!r.columns) {
-    card.innerHTML = `<div class="file-head"><div><h2>${esc(entry.fileName)}</h2><div class="src">No green sheet table was found in this file.</div></div><span class="status err">Not converted</span></div>
+    card.innerHTML = `<div class="file-head"><div><h2>${esc(entry.fileName)}</h2><div class="src">No green sheet table was found in this file.</div></div><div class="head-right"><span class="status err">Not converted</span><button class="remove" data-role="remove">Remove</button></div></div>
       <div class="pane"><ul class="checks">${r.checks.map(c => `<li class="${c.level}"><span class="ic">${ICON[c.level]}</span><span>${esc(c.msg)}</span></li>`).join('')}</ul></div>`;
+    $('[data-role=remove]', card).addEventListener('click', () => removeEntry(entry.id));
     return;
   }
   const subjects = [...new Set(r.columns.filter(c => c.group).map(c => c.group.label))];
@@ -91,7 +110,7 @@ function render(entry, card) {
           <div class="stat"><b>${r.stats.pages}</b><span>PDF pages</span></div>
         </div>
       </div>
-      <span class="status ${status[0]}">${status[1]}</span>
+      <div class="head-right"><span class="status ${status[0]}">${status[1]}</span><button class="remove" data-role="remove" aria-label="Remove ${esc(entry.fileName)}">Remove</button></div>
     </div>
     <div class="body">
       <div class="pane">
@@ -119,6 +138,7 @@ function render(entry, card) {
     </div>
     <details class="preview"><summary>Preview all ${r.grid.length} rows exactly as they will appear in Excel</summary><div class="tablewrap">${previewTable(r)}</div></details>`;
 
+  $('[data-role=remove]', card).addEventListener('click', () => removeEntry(entry.id));
   const opts = () => ({
     orientation: $(`#${entry.id}-orient`, card).value,
     fontSize: +$(`#${entry.id}-size`, card).value,

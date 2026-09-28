@@ -33,6 +33,7 @@
   color-scheme: dark;
 }
 *{box-sizing:border-box}
+[hidden]{display:none!important}
 html,body{margin:0}
 body{background:var(--bg);color:var(--ink);font:15px/1.5 Figtree,"Segoe UI",system-ui,-apple-system,sans-serif;padding-inline:16px;padding-block:0 48px}
 .wrap{max-width:1180px;margin:0 auto;display:grid;grid-template-columns:minmax(0,1fr);gap:20px}
@@ -66,6 +67,9 @@ h1{font-size:clamp(24px,3.2vw,32px);line-height:1.15;margin:0;letter-spacing:-.0
 .stat{display:grid}
 .stat b{font-size:20px;font-variant-numeric:tabular-nums;line-height:1.1}
 .stat span{font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted)}
+.head-right{display:flex;align-items:center;gap:10px}
+.remove{appearance:none;border:1px solid var(--line);background:transparent;color:var(--muted);border-radius:999px;padding:4px 12px;font:600 13px/1.3 inherit;font-family:inherit;cursor:pointer}
+.remove:hover{color:var(--err);border-color:var(--err)}
 .status{font-size:13px;font-weight:700;padding:4px 10px;border-radius:999px;white-space:nowrap}
 .status.ok{background:var(--ok-soft);color:var(--ok)} .status.err{background:var(--err-soft);color:var(--err)} .status.warn{background:var(--warn-soft);color:var(--warn)}
 .body{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:0}
@@ -137,7 +141,10 @@ table.pv thead .sticky,table.pv thead .sticky2{z-index:3}
     <div class="opts">
       <label><input type="checkbox" id="optNumbers" checked> Store marks as numbers (shows 5.0 as 5.0, allows sums)</label>
     </div>
-    <button class="btn primary" id="allXlsx">Download all classes in one workbook</button>
+    <div class="actions">
+      <button class="btn ghost" id="clearAll">Clear all</button>
+      <button class="btn primary" id="allXlsx">Download all classes in one workbook</button>
+    </div>
   </div>
 
   <div id="files"></div>

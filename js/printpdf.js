@@ -92,9 +92,47 @@ export function planPrint(doc, result, opts) {
   }
   if (cur.length) parts.push(cur);
 
+  // spread the pieces evenly over the same number of sheets (keeps order)
+  if (parts.length > 1 && !perPage) {
+    const P = parts.length, n = pieces.length, w = pieces.map(chunkW);
+    const pre = [0]; w.forEach(x => pre.push(pre[pre.length - 1] + x));
+    const span = (a, b) => pre[b] - pre[a];
+    const INF = 1e18;
+    const best = Array.from({ length: P + 1 }, () => Array(n + 1).fill(INF));
+    const cut = Array.from({ length: P + 1 }, () => Array(n + 1).fill(-1));
+    best[0][0] = 0;
+    for (let p = 1; p <= P; p++) for (let b = 1; b <= n; b++) for (let a = p - 1; a < b; a++) {
+      const cap = p === 1 ? availFirst : availNext;
+      if (span(a, b) > cap || best[p - 1][a] === INF) continue;
+      const v = Math.max(best[p - 1][a], span(a, b));
+      if (v < best[p][b]) { best[p][b] = v; cut[p][b] = a; }
+    }
+    if (best[P][n] < INF) {
+      const out = []; let b = n;
+      for (let p = P; p >= 1; p--) { const a = cut[p][b]; out.unshift(pieces.slice(a, b)); b = a; }
+      parts.length = 0; parts.push(...out);
+    }
+  }
+
   // vertical layout — identical on every part
   doc.setFont('helvetica', 'bold'); doc.setFontSize(hfs);
-  const groupH = hfs * 1.2 + 2 * pad;
+  // stretch columns so each sheet uses the page width (at most 1.5x); rows stay aligned
+  for (const part of parts) {
+    const ids = part.flatMap(ch => ch.cols);
+    const used = ids.reduce((a, i) => a + widths[i], 0);
+    const room = (parts.indexOf(part) === 0 ? availFirst : availNext);
+    const f = Math.min(1.5, room / used);
+    if (f > 1) ids.forEach(i => { widths[i] *= f; });
+  }
+  // subject names may wrap (e.g. "Artificial Intelligence" over three narrow columns)
+  const groupLines = {};
+  for (const part of parts) for (const ch of part) if (ch.label) {
+    const span = ch.cols.reduce((a, i) => a + widths[i], 0);
+    const lines = wrapWords(doc, ch.label + (ch.cont ? ' (contd.)' : ''), span - 2 * pad);
+    groupLines[ch.key + (ch.cont ? '+' : '')] = lines;
+  }
+  const maxGL = Math.max(1, ...Object.values(groupLines).map(l => l.length));
+  const groupH = maxGL * hfs * 1.2 + 2 * pad;
   const leafH = Math.max(hfs * 2.4 + 2 * pad, ...leaf.filter(l => l.rotated).map(l => l.len + 2 * pad));
   const flatHead = cols.filter((c, i) => !leaf[i].rotated).map(c => wrapWords(doc, c.leaf, widths[c.index] - 2 * pad).length * hfs * 1.15 + 2 * pad);
   const headH = Math.max(groupH + leafH, ...flatHead);
@@ -115,7 +153,7 @@ export function planPrint(doc, result, opts) {
     blocks.push([start, end]);
     start = end;
   }
-  return { fs, hfs, pad, lineH, W, H, m, cols, rows, widths, fixed, parts, groupH, leafH, headH, titleLines, titleH, footH, rowH, blocks, leaf };
+  return { fs, hfs, pad, lineH, W, H, m, cols, rows, widths, fixed, parts, groupH, groupLines, leafH, headH, titleLines, titleH, footH, rowH, blocks, leaf };
 }
 
 export function buildPrintPdf(jsPDF, result, userOpts = {}) {
@@ -166,7 +204,9 @@ export function buildPrintPdf(jsPDF, result, userOpts = {}) {
             doc.setFont('helvetica', 'bold'); doc.setFontSize(hfs); doc.setTextColor(...INK);
             const piece = part.find(ch => ch.cols.includes(ci));
             const label = c.group.label + (piece && piece.cont ? ' (contd.)' : '');
-            doc.text(label, x + span / 2, hy + P.groupH / 2 + hfs * 0.35, { align: 'center', maxWidth: span - 2 });
+            const gl = P.groupLines[(piece ? piece.key : gid) + (piece && piece.cont ? '+' : '')] || wrapWords(doc, label, span - 2 * pad);
+            const gb = gl.length * hfs * 1.2;
+            gl.forEach((ln, li) => doc.text(ln, x + span / 2, hy + (P.groupH - gb) / 2 + (li + 0.8) * hfs * 1.2, { align: 'center' }));
           }
           doc.setFillColor(...HEAD_BG); doc.rect(x, hy + P.groupH, w, P.headH - P.groupH, 'FD');
           doc.setFont('helvetica', 'bold'); doc.setFontSize(hfs); doc.setTextColor(...INK);
@@ -212,7 +252,7 @@ export function buildPrintPdf(jsPDF, result, userOpts = {}) {
       doc.setFont('helvetica', 'normal'); doc.setFontSize(fs - 2); doc.setTextColor(90, 100, 105);
       const subj = part.map(ch => ch.label || 'Totals').filter((v, i, a) => a.indexOf(v) === i).join(', ');
       const sn = k => (P.rows[k].cells[0] || [])[0] || String(k + 1);
-      doc.text(`${clsLine}   ·   Students ${sn(r0)}–${sn(r1 - 1)}   ·   Part ${pi + 1} of ${P.parts.length}: ${subj}${pi > 0 ? '   ·   place to the right of Part ' + pi : ''}`, m, H - m + 2);
+      doc.text([clsLine, `Students ${sn(r0)}–${sn(r1 - 1)}`, `Part ${pi + 1} of ${P.parts.length}: ${subj}`, pi > 0 ? `place to the right of Part ${pi}` : ''].filter(Boolean).join('   ·   '), m, H - m + 2);
       doc.text(`Page ${pageNo} of ${total}`, W - m, H - m + 2, { align: 'right' });
     });
   });
